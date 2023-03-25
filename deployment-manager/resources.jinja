@@ -1,0 +1,177 @@
+resources:
+
+- name: {{ properties["BUCKET_NAME"] }}
+  type: storage.v1.bucket
+  properties:
+    predefinedAcl: projectPrivate
+    projection: full
+    location: {{ properties["REGION"] }}
+    storageClass: STANDARD
+    defaultObjectAcl:
+      - entity: project-editors-{{ env["project_number"] }}
+        role: READER
+    lifecycle:
+      rule:
+        - action:
+            type: Delete
+          condition:
+            age: 90
+            isLive: true
+    versioning:
+      enabled: false
+  accessControl:
+    gcpIamPolicy:
+      bindings:
+      - role: "roles/storage.objectCreator"
+        members:
+        - "serviceAccount:uploader@{{ env['project'] }}.iam.gserviceaccount.com"
+  metadata:
+    dependsOn:
+     - serviceaccount-uploader
+
+- name: serviceaccount-uploader
+  type: iam.v1.serviceAccount
+  properties:
+    displayName: uploader
+    accountId: uploader
+
+- name: serviceaccount-analytics
+  type: iam.v1.serviceAccount
+  properties:
+    displayName: analytics
+    accountId: analytics
+
+- name: dataset-analytics
+  type: bigquery.v2.dataset
+  properties:
+    datasetReference:
+      datasetId: analytics
+    location: EU
+    access:
+    -  role: "roles/bigquery.admin"
+       specialGroup: "projectOwners"
+    -  role: "roles/bigquery.dataOwner"
+       userByEmail: "analytics@{{ env['project'] }}.iam.gserviceaccount.com"
+    -  role: "roles/bigquery.dataOwner"
+       userByEmail: "{{ env['project'] }}@appspot.gserviceaccount.com"
+  metadata:
+    dependsOn:
+     - serviceaccount-analytics
+
+- name: table-events
+  type: bigquery.v2.table
+  properties:
+    datasetId: $(ref.dataset-analytics.datasetReference.datasetId)
+    timePartitioning:
+      type: DAY
+      field: event_time
+    tableReference:
+      tableId: events
+    schema:
+      fields:
+       - name: event_time
+         type: TIMESTAMP
+         mode: REQUIRED
+         description: time stamp for event generated on device
+       - name: receive_time
+         type: TIMESTAMP
+         mode: REQUIRED
+         description: time stamp event received
+       - name: user_email
+         type: STRING
+         mode: REQUIRED
+         description: user email address camera registered to
+       - name: camera_name
+         type: STRING
+         mode: REQUIRED
+         description: name of camera device
+       - name: camera_id
+         type: INTEGER
+         mode: REQUIRED
+         description: camera device id number
+       - name: event
+         type: INTEGER
+         mode: REQUIRED
+         description: image event number
+       - name: frame
+         type: INTEGER
+         mode: REQUIRED
+         description: image frame number
+       - name: pixels_changed
+         type: INTEGER
+         mode: REQUIRED
+         description: number of pixels changed to detect motion
+       - name: noise
+         type: INTEGER
+         mode: REQUIRED
+         description: amount of noise calculated in image
+       - name: area_height
+         type: INTEGER
+         mode: REQUIRED
+         description: height of movement area in pixels
+       - name: area_width
+         type: INTEGER
+         mode: REQUIRED
+         description: width of movement area in pixels
+       - name: area_x
+         type: INTEGER
+         mode: REQUIRED
+         description: x co-ordinates of movement area
+       - name: area_y
+         type: INTEGER
+         mode: REQUIRED
+         description: y co-ordinates of movement area
+       - name: phone_at_home
+         type: BOOLEAN
+         mode: REQUIRED
+         description: Boolean flag in to indicate whether device is at home
+       - name: file_object
+         type: STRING
+         mode: NULLABLE
+         description: Object key within Cloud Storage bucket
+       - name: num_faces
+         type: INTEGER
+         mode: NULLABLE
+         description: number of faces detected in image
+       - name: brightness
+         type: FLOAT
+         mode: NULLABLE
+         description: number of faces detected in image
+
+- name: pubsub-events
+  type: pubsub.v1.topic
+  properties:
+    topic: events
+  accessControl:
+    gcpIamPolicy:
+      bindings:
+      - role: roles/pubsub.publisher
+        members:
+        - "serviceAccount:uploader@{{ env['project'] }}.iam.gserviceaccount.com"
+  metadata:
+    dependsOn:
+     - serviceaccount-uploader
+     
+- name: pubsub_to_bigquery
+  type: cloud_function.py
+  properties:
+    codeLocation: functions/pubsub_to_bigquery/
+    codeBucket: {{ properties["BUCKET_NAME"] }}
+    codeBucketObject: pubsub_to_bigquery.zip
+    location: {{ properties["REGION"] }}
+    timeout: 60s
+    entryPoint: handler
+    availableMemoryMb: 128
+    environmentVariables:
+       BIGQUERY_DATASET_ID: $(ref.dataset-analytics.datasetReference.datasetId)
+       BIGQUERY_TABLE_ID: $(ref.table-events.tableReference.tableId)
+       BUCKET_NAME: {{ properties["BUCKET_NAME"] }}
+       SEND_GRID_API_KEY: {{ properties["SEND_GRID_API_KEY"] }}
+       SEND_GRID_DOMAIN: {{ properties["SEND_GRID_DOMAIN"] }}
+    runtime: python37
+    eventTrigger:
+       resource: $(ref.pubsub-events.name)
+       eventType: providers/cloud.pubsub/eventTypes/topic.publish
+  metadata:
+    dependsOn:
+     - {{ properties["BUCKET_NAME"] }}
